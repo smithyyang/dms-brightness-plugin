@@ -1,11 +1,12 @@
 {
-    "id": "ddcBrightness",
-    "name": "DDC Brightness",
-    "description": "Control external monitor brightness via DDC/CI (ddcutil)",
-    "version": "1.0.0",
-    "author": "youngshine",
-    "icon": "brightness_high",
-    "type": "widget",
-    "component": "DdcBrightness.qml",
-    "permissions": ["process"]
+  "id": "ddcBrightness",
+  "name": "DDC Brightness",
+  "description": "Control internal and external monitor brightness via brightnessctl and ddcutil",
+  "version": "1.0.0",
+  "author": "youngshine",
+  "icon": "brightness_high",
+  "type": "widget",
+  "component": "./DdcBrightness.qml",
+  "capabilities": ["dankbar-widget"],
+  "permissions": ["process"]
 }
