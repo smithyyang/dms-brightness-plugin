@@ -1,0 +1,11 @@
+{
+    "id": "ddcBrightness",
+    "name": "DDC Brightness",
+    "description": "Control external monitor brightness via DDC/CI (ddcutil)",
+    "version": "1.0.0",
+    "author": "youngshine",
+    "icon": "brightness_high",
+    "type": "widget",
+    "component": "DdcBrightness.qml",
+    "permissions": ["process"]
+}
