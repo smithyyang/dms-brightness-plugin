@@ -9,7 +9,20 @@ import qs.Modules.Plugins
 PluginComponent {
     id: root
 
-    property bool loading: true
+    property bool loading: false
+    property bool hasScanned: false
+
+    function startScan(forceRefresh) {
+        if (procScan.running)
+            return
+
+        if (!forceRefresh && hasScanned)
+            return
+
+        hasScanned = true
+        loading = true
+        procScan.running = true
+    }
 
     ListModel {
         id: monitorsModel
@@ -29,14 +42,41 @@ PluginComponent {
             "  done\n" +
             "fi\n" +
             "if command -v ddcutil &>/dev/null; then\n" +
-            "  for bus in $(ddcutil detect --terse 2>/dev/null | awk -F'-' '/I2C bus:/ {print $2}'); do\n" +
-            "    val=$(ddcutil getvcp 10 --bus \"$bus\" --terse 2>/dev/null | awk '{print $4}')\n" +
-            "    if [ -n \"$val\" ]; then\n" +
-            "      name=$(ddcutil detect --bus \"$bus\" 2>/dev/null | awk -F':' '/Model:/ {print $2}' | xargs)\n" +
-            "      [ -z \"$name\" ] && name=\"External Display (Bus $bus)\"\n" +
-            "      res=\"$res{\\\"id\\\":\\\"$bus\\\",\\\"name\\\":\\\"$name\\\",\\\"type\\\":\\\"ddc\\\",\\\"level\\\":$val},\"\n" +
-            "    fi\n" +
-            "  done\n" +
+            "  detect_output=$(timeout 3s ddcutil detect --terse 2>/dev/null)\n" +
+            "  detect_status=$?\n" +
+            "  if [ \"$detect_status\" -ne 0 ]; then\n" +
+            "    exit 1\n" +
+            "  fi\n" +
+            "  current_bus=\"\"\n" +
+            "  current_name=\"\"\n" +
+            "  current_valid=0\n" +
+            "  while IFS= read -r line; do\n" +
+            "    case \"$line\" in\n" +
+            "      \"Invalid display\"*)\n" +
+            "        current_bus=\"\"\n" +
+            "        current_name=\"\"\n" +
+            "        current_valid=0\n" +
+            "        ;;\n" +
+            "      \"Display \"*)\n" +
+            "        current_bus=\"\"\n" +
+            "        current_name=\"\"\n" +
+            "        current_valid=1\n" +
+            "        ;;\n" +
+            "      *\"I2C bus:\"*)\n" +
+            "        current_bus=$(printf '%s' \"$line\" | awk -F'/dev/i2c-' '{print $2}' | xargs)\n" +
+            "        current_name=\"\"\n" +
+            "        ;;\n" +
+            "      *\"Monitor:\"*)\n" +
+            "        current_name=$(printf '%s' \"$line\" | awk -F'Monitor:' '{print $2}' | sed 's/^ *//' | sed 's/:$//')\n" +
+            "        if [ \"$current_valid\" -eq 1 ] && [ -n \"$current_bus\" ]; then\n" +
+            "          val=$(timeout 2s ddcutil getvcp 10 --bus \"$current_bus\" --terse 2>/dev/null | awk '{print $4}')\n" +
+            "          [ -z \"$val\" ] && val=-1\n" +
+            "          [ -z \"$current_name\" ] && current_name=\"External Display (Bus $current_bus)\"\n" +
+            "          res=\"$res{\\\"id\\\":\\\"$current_bus\\\",\\\"name\\\":\\\"$current_name\\\",\\\"type\\\":\\\"ddc\\\",\\\"level\\\":$val},\"\n" +
+            "        fi\n" +
+            "        ;;\n" +
+            "    esac\n" +
+            "  done <<< \"$detect_output\"\n" +
             "fi\n" +
             "res=\"${res%,}]\"\n" +
             "[ \"$res\" = \"]\" ] && res=\"[]\"\n" +
@@ -48,22 +88,41 @@ PluginComponent {
                 if (cleanText) {
                     try {
                         var arr = JSON.parse(cleanText)
+                        var previous = {}
+                        for (var i = 0; i < monitorsModel.count; i++) {
+                            var existing = monitorsModel.get(i)
+                            previous[existing.type + ":" + existing.id] = existing
+                        }
+
+                        if (arr.length === 0 && monitorsModel.count > 0) {
+                            console.warn("DDC scan returned no monitors, keeping previous results")
+                            return
+                        }
+
                         monitorsModel.clear()
                         for (var i = 0; i < arr.length; i++) {
-                            arr[i].busy = false
-                            monitorsModel.append(arr[i])
+                            var item = arr[i]
+                            var existingMonitor = previous[item.type + ":" + item.id]
+
+                            if (item.level < 0)
+                                item.level = existingMonitor ? existingMonitor.level : 50
+
+                            item.busy = existingMonitor ? existingMonitor.busy : false
+                            monitorsModel.append(item)
                         }
                     } catch(e) {
                         console.warn("DDC Parse Error:", e, cleanText)
                     }
                 }
-                root.loading = false
             }
         }
-    }
 
-    Component.onCompleted: {
-        procScan.running = true
+        onExited: exitCode => {
+            if (exitCode !== 0)
+                console.warn("DDC scan failed with code:", exitCode)
+
+            root.loading = false
+        }
     }
 
     horizontalBarPill: Component {
@@ -86,6 +145,7 @@ PluginComponent {
         PopoutComponent {
             headerText: "Brightness Control"
             showCloseButton: true
+            Component.onCompleted: root.startScan(false)
 
             Item {
                 width: parent.width
@@ -126,6 +186,41 @@ PluginComponent {
                             required property string id
                             required property int level
                             required property bool busy
+                            property int queuedLevel: -1
+                            property int applyingLevel: -1
+
+                            function currentMonitor() {
+                                if (monitorDelegate.index < 0 || monitorDelegate.index >= monitorsModel.count)
+                                    return null
+
+                                var current = monitorsModel.get(monitorDelegate.index)
+                                if (!current || current.id !== monitorDelegate.id || current.type !== monitorDelegate.type)
+                                    return null
+
+                                return current
+                            }
+
+                            function setBusyState(value) {
+                                if (currentMonitor())
+                                    monitorsModel.setProperty(monitorDelegate.index, "busy", value)
+                            }
+
+                            function runSetter(level) {
+                                var current = currentMonitor()
+                                if (!current)
+                                    return
+
+                                applyingLevel = level
+                                queuedLevel = -1
+
+                                if (current.type === "ddc") {
+                                    setterProc.command = ["timeout", "3s", "ddcutil", "setvcp", "10", String(level), "--bus", current.id, "--noverify"]
+                                } else {
+                                    setterProc.command = ["brightnessctl", "-d", current.id, "s", String(level) + "%"]
+                                }
+
+                                setterProc.running = true
+                            }
 
                             width: parent.width
                             spacing: Theme.spacingM
@@ -188,27 +283,37 @@ PluginComponent {
                                 interval: 300
                                 repeat: false
                                 onTriggered: {
-                                    // 在执行命令前，强行抓取最新的 model 数值
-                                    var curLevel = monitorsModel.get(monitorDelegate.index).level
-                                    var curId = monitorsModel.get(monitorDelegate.index).id
-                                    var curType = monitorsModel.get(monitorDelegate.index).type
-                                    
-                                    if (curType === "ddc") {
-                                        setterProc.command = ["ddcutil", "setvcp", "10", String(curLevel), "--bus", curId, "--noverify"]
-                                    } else {
-                                        setterProc.command = ["brightnessctl", "-d", curId, "s", String(curLevel) + "%"]
+                                    var current = monitorDelegate.currentMonitor()
+                                    if (!current)
+                                        return
+
+                                    if (setterProc.running) {
+                                        monitorDelegate.queuedLevel = current.level
+                                        return
                                     }
-                                    
-                                    if (!setterProc.running) {
-                                        setterProc.running = true
-                                    }
+
+                                    monitorDelegate.runSetter(current.level)
                                 }
                             }
 
                             Process {
                                 id: setterProc
-                                onStarted: monitorsModel.setProperty(monitorDelegate.index, "busy", true)
-                                onExited: monitorsModel.setProperty(monitorDelegate.index, "busy", false)
+                                onStarted: monitorDelegate.setBusyState(true)
+                                onExited: exitCode => {
+                                    if (exitCode !== 0)
+                                        console.warn("Brightness apply failed for", monitorDelegate.name, "with code", exitCode)
+
+                                    var nextLevel = monitorDelegate.queuedLevel
+                                    monitorDelegate.queuedLevel = -1
+
+                                    if (nextLevel >= 0 && nextLevel !== monitorDelegate.applyingLevel) {
+                                        monitorDelegate.runSetter(nextLevel)
+                                        return
+                                    }
+
+                                    monitorDelegate.applyingLevel = -1
+                                    monitorDelegate.setBusyState(false)
+                                }
                             }
 
                             Item {
@@ -230,11 +335,7 @@ PluginComponent {
                         visible: !root.loading
                         text: "Refresh"
                         width: parent.width
-                        onClicked: {
-                            root.loading = true
-                            monitorsModel.clear()
-                            procScan.running = true
-                        }
+                        onClicked: root.startScan(true)
                     }
                 }
             }
