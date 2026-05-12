@@ -138,6 +138,20 @@ PluginComponent {
         }
     }
 
+    verticalBarPill: Component {
+        Item {
+            implicitWidth: Theme.iconSize
+            implicitHeight: Theme.iconSize
+
+            DankIcon {
+                property int avgLevel: monitorsModel.count > 0 ? monitorsModel.get(0).level : 50
+                name: avgLevel > 66 ? "brightness_high" : avgLevel > 33 ? "brightness_medium" : "brightness_low"
+                size: Theme.iconSize * 0.85
+                anchors.centerIn: parent
+            }
+        }
+    }
+
     popoutWidth: 360
     popoutHeight: mainCol.implicitHeight + Theme.spacingL * 2 + 50
 
